@@ -435,16 +435,14 @@ begin
       GmiView.Lines.BeginUpdate;
       try
         GmiView.Lines.Text := '';
-        GmiView.Lines.Add(Format('%d  %s', [R.StatusCode, R.Meta]));
-        GmiView.Lines.Add('');
         Render(StreamToUtf8(R.Content));
         if R.Status = IdGemini.gsCertRequired then
           AddCreateIdentityHint;
       finally
         GmiView.Lines.EndUpdate;
       end;
-      FPageStatus := Format('%s   [%d %s]', [AURL, R.StatusCode, R.Meta]);
-      StatusBar.SimpleText := FPageStatus;
+      FPageStatus := '';
+      StatusBar.SimpleText := '';
       if APush then PushHistory(AURL);
     finally
       R.Free;
