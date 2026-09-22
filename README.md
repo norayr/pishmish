@@ -1,6 +1,8 @@
-# pishmish — proof-of-concept Gemini browser
+# pishmish
 
 A minimal Gemini client for Lazarus built on `TIdGemini` + SynEdit.
+
+## Features
 
 - Address bar + Go, identity selector, status bar.
 - Fetches with the selected **identity** (a `.crt`/`.key` pair from
