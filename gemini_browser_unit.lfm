@@ -18,16 +18,32 @@ object MainForm: TMainForm
     Align = alTop
     ClientHeight = 40
     ClientWidth = 940
-    object UrlEdit: TEdit
+    object BackBtn: TButton
       Left = 8
       Height = 30
       Top = 5
-      Width = 470
+      Width = 36
+      Caption = '◀'
+      OnClick = BackClick
+    end
+    object FwdBtn: TButton
+      Left = 48
+      Height = 30
+      Top = 5
+      Width = 36
+      Caption = '▶'
+      OnClick = FwdClick
+    end
+    object UrlEdit: TEdit
+      Left = 92
+      Height = 30
+      Top = 5
+      Width = 430
       Text = 'gemini://bbs.geminispace.org/'
       OnKeyPress = UrlEditKeyPress
     end
     object GoBtn: TButton
-      Left = 486
+      Left = 530
       Height = 30
       Top = 5
       Width = 84
@@ -35,10 +51,11 @@ object MainForm: TMainForm
       OnClick = GoBtnClick
     end
     object IdentityBox: TComboBox
-      Left = 580
+      Left = 622
       Height = 30
       Top = 5
-      Width = 350
+      Width = 310
+      OnChange = IdentityBoxChange
     end
   end
   object GmiView: TSynEdit

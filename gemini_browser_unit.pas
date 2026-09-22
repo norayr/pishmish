@@ -7,6 +7,7 @@ interface
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs,
   StdCtrls, ExtCtrls, ComCtrls,
+  Process,
   SynEdit,
   IdGlobal, IdSSL, IdSSLOpenSSL, IdSSLOpenSSLHeaders, IdGemini, IdURI;
 
@@ -18,6 +19,8 @@ type
 
   TMainForm = class(TForm)
     TopBar: TPanel;
+    BackBtn: TButton;
+    FwdBtn: TButton;
     UrlEdit: TEdit;
     GoBtn: TButton;
     IdentityBox: TComboBox;
@@ -28,6 +31,9 @@ type
     procedure FormDestroy(Sender: TObject);
     procedure UrlEditKeyPress(Sender: TObject; var Key: Char);
     procedure GoBtnClick(Sender: TObject);
+    procedure BackClick(Sender: TObject);
+    procedure FwdClick(Sender: TObject);
+    procedure IdentityBoxChange(Sender: TObject);
   private
     FGemini: TIdGemini;
     FCurrentURL: string;
@@ -37,17 +43,32 @@ type
     FDocLinkEnd: array of Integer;   // line index -> last column of the visible label
     FLinkLine: Integer;              // hovered link line, -1 = none
     FStarted: Boolean;
+    FRefreshing: Boolean;
+    FHistory: array of string;
+    FHistoryPos: Integer;
     function CertSubject(const AFileName: string): string;
     procedure LoadIdents;
+    procedure SelectIdentity(AIndex: Integer);
     function ResolveLink(const ARelative: string): string;
-    procedure Fetch(const AURL: string);
+    procedure Fetch(const AURL: string; APush: Boolean = True);
     procedure Render(const ABody: string);
+    procedure AddCreateIdentityHint;
     procedure GmiMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
     procedure GmiMouseLeave(Sender: TObject);
     procedure GmiPaint(Sender: TObject; ACanvas: TCanvas);
     procedure GmiMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
     procedure FormMouseWheel(Sender: TObject; Shift: TShiftState;
       WheelDelta: Integer; MousePos: TPoint; var Handled: Boolean);
+    procedure PushHistory(const AURL: string);
+    procedure UpdateNavButtons;
+    function RunCli(const AArgs: TStringList; ANeedOutput: Boolean; out AOutput: string): Boolean;
+    procedure CreateNewIdentity(out ACreated: Boolean; out ANewKey: string);
+  end;
+
+  TNewIdentityDialog = class(TForm)
+  public
+    EdName, EdEmail: TEdit;
+    constructor CreateDialog;
   end;
 
 var
@@ -58,6 +79,10 @@ implementation
 uses IdException;
 
 {$R *.lfm}
+
+const
+  kOpenSSL = '/opt/openssl-1.0.2u/bin/openssl';
+  kNewIdentityCmd = '^NEWID';
 
 function IdentsDir: string;
 begin
@@ -77,6 +102,62 @@ begin
   Result := TEncoding.UTF8.GetString(Buf);
 end;
 
+function AskIdentityParams(out AName, AEmail: string): Boolean;
+var
+  Dlg: TNewIdentityDialog;
+  LblName, LblEmail: TLabel;
+  OkBtn, CancelBtn: TButton;
+begin
+  Result := False;
+  Dlg := TNewIdentityDialog.CreateDialog;
+  try
+    LblName := TLabel.Create(Dlg);
+    LblName.Parent := Dlg;
+    LblName.Left := 12; LblName.Top := 10;
+    LblName.Caption := 'Identity name (shown to servers)';
+    Dlg.EdName := TEdit.Create(Dlg);
+    Dlg.EdName.Parent := Dlg;
+    Dlg.EdName.Left := 12; Dlg.EdName.Top := 32; Dlg.EdName.Width := 316;
+    LblEmail := TLabel.Create(Dlg);
+    LblEmail.Parent := Dlg;
+    LblEmail.Left := 12; LblEmail.Top := 60;
+    LblEmail.Caption := 'Email (optional)';
+    Dlg.EdEmail := TEdit.Create(Dlg);
+    Dlg.EdEmail.Parent := Dlg;
+    Dlg.EdEmail.Left := 12; Dlg.EdEmail.Top := 82; Dlg.EdEmail.Width := 316;
+    OkBtn := TButton.Create(Dlg);
+    OkBtn.Parent := Dlg;
+    OkBtn.Caption := 'OK';
+    OkBtn.ModalResult := mrOk;
+    OkBtn.Default := True;
+    OkBtn.Left := 160; OkBtn.Top := 118; OkBtn.Width := 84; OkBtn.Height := 30;
+    CancelBtn := TButton.Create(Dlg);
+    CancelBtn.Parent := Dlg;
+    CancelBtn.Caption := 'Cancel';
+    CancelBtn.ModalResult := mrCancel;
+    CancelBtn.Cancel := True;
+    CancelBtn.Left := 248; CancelBtn.Top := 118; CancelBtn.Width := 84; CancelBtn.Height := 30;
+    Dlg.ActiveControl := Dlg.EdName;
+    if Dlg.ShowModal = mrOk then
+    begin
+      AName := Trim(Dlg.EdName.Text);
+      AEmail := Trim(Dlg.EdEmail.Text);
+      Result := AName <> '';
+    end;
+  finally
+    Dlg.Free;
+  end;
+end;
+
+constructor TNewIdentityDialog.CreateDialog;
+begin
+  inherited CreateNew(nil);
+  Caption := 'Create identity';
+  ClientWidth := 340;
+  ClientHeight := 158;
+  Position := poScreenCenter;
+end;
+
 procedure TMainForm.FormCreate(Sender: TObject);
 begin
   FGemini := TIdGemini.Create(Self);
@@ -84,6 +165,8 @@ begin
   IdentityBox.ItemIndex := 0;
   FLinkLine := -1;
   FPageStatus := '';
+  FHistoryPos := -1;
+  UpdateNavButtons;
   // heliko-style mouse link handling; note: no '@' prefix, see ../etest
   GmiView.OnMouseMove := GmiMouseMove;
   GmiView.OnMouseLeave := GmiMouseLeave;
@@ -140,32 +223,51 @@ var
   FP, Subject, Dir: string;
 begin
   Dir := IdentsDir;
-  IdentityBox.Items.BeginUpdate;
+  FRefreshing := True;
   try
-    IdentityBox.Items.Clear;
-    IdentityBox.Items.Add('(no identity)');
-    if FindFirst(Dir + '*.crt', faAnyFile, SR) = 0 then
+    SetLength(FIdents, 0);
+    IdentityBox.Items.BeginUpdate;
     try
-      repeat
-        FP := ChangeFileExt(SR.Name, '');
-        Subject := CertSubject(Dir + SR.Name);
-        if Subject = '' then Continue;
-        Entry.LabelText := Subject + '  [' + Copy(FP, 1, 8) + ']';
-        Entry.Crt := Dir + SR.Name;
-        Entry.Key := Dir + FP + '.key';
-        SetLength(FIdents, Length(FIdents) + 1);
-        FIdents[High(FIdents)] := Entry;
-        IdentityBox.Items.Add(Entry.LabelText);
-      until FindNext(SR) <> 0;
+      IdentityBox.Items.Clear;
+      IdentityBox.Items.Add('(no identity)');
+      if FindFirst(Dir + '*.crt', faAnyFile, SR) = 0 then
+      try
+        repeat
+          FP := ChangeFileExt(SR.Name, '');
+          Subject := CertSubject(Dir + SR.Name);
+          if Subject = '' then Continue;
+          Entry.LabelText := Subject + '  [' + Copy(FP, 1, 8) + ']';
+          Entry.Crt := Dir + SR.Name;
+          Entry.Key := Dir + FP + '.key';
+          SetLength(FIdents, Length(FIdents) + 1);
+          FIdents[High(FIdents)] := Entry;
+          IdentityBox.Items.Add(Entry.LabelText);
+        until FindNext(SR) <> 0;
+      finally
+        FindClose(SR);
+      end;
+      IdentityBox.Items.Add('＋ create new identity…');
     finally
-      FindClose(SR);
+      IdentityBox.Items.EndUpdate;
     end;
   finally
-    IdentityBox.Items.EndUpdate;
+    FRefreshing := False;
   end;
-  if IdentityBox.Items.Count < 2 then
-    StatusBar.SimpleText := 'No identities in ' + Dir +
-      ' (put cert+key pairs there, or it works with Lagrange idents)';
+  if Length(FIdents) = 0 then
+    StatusBar.SimpleText := 'No identities yet — pick "create new identity" in the list';
+end;
+
+procedure TMainForm.SelectIdentity(AIndex: Integer);
+begin
+  if (AIndex >= 0) and (AIndex < IdentityBox.Items.Count) then
+  begin
+    FRefreshing := True;
+    try
+      IdentityBox.ItemIndex := AIndex;
+    finally
+      FRefreshing := False;
+    end;
+  end;
 end;
 
 function TMainForm.ResolveLink(const ARelative: string): string;
@@ -214,6 +316,24 @@ begin
   finally
     U.Free;
   end;
+end;
+
+procedure TMainForm.AddCreateIdentityHint;
+var
+  LineNo: Integer;
+  S: string;
+begin
+  GmiView.Lines.Add('');
+  S := '＋ create an identity, then try again';
+  LineNo := GmiView.Lines.Count;
+  GmiView.Lines.Add(S);
+  if LineNo >= Length(FDocLinks) then
+  begin
+    SetLength(FDocLinks, LineNo + 1);
+    SetLength(FDocLinkEnd, LineNo + 1);
+  end;
+  FDocLinks[LineNo] := kNewIdentityCmd;
+  FDocLinkEnd[LineNo] := Length(S);
 end;
 
 procedure TMainForm.Render(const ABody: string);
@@ -279,7 +399,7 @@ begin
   end;
 end;
 
-procedure TMainForm.Fetch(const AURL: string);
+procedure TMainForm.Fetch(const AURL: string; APush: Boolean = True);
 var
   R: TGeminiResponse;
   Input: string;
@@ -318,11 +438,14 @@ begin
         GmiView.Lines.Add(Format('%d  %s', [R.StatusCode, R.Meta]));
         GmiView.Lines.Add('');
         Render(StreamToUtf8(R.Content));
+        if R.Status = IdGemini.gsCertRequired then
+          AddCreateIdentityHint;
       finally
         GmiView.Lines.EndUpdate;
       end;
       FPageStatus := Format('%s   [%d %s]', [AURL, R.StatusCode, R.Meta]);
       StatusBar.SimpleText := FPageStatus;
+      if APush then PushHistory(AURL);
     finally
       R.Free;
     end;
@@ -336,6 +459,117 @@ begin
   end;
 end;
 
+function TMainForm.RunCli(const AArgs: TStringList; ANeedOutput: Boolean; out AOutput: string): Boolean;
+var
+  P: TProcess;
+  I, N: Integer;
+  Buf: array[0..8191] of AnsiChar;
+  Tmp: AnsiString;
+begin
+  Result := False;
+  AOutput := '';
+  if not FileExists(kOpenSSL) then
+    raise Exception.Create('openssl not found at ' + kOpenSSL);
+  P := TProcess.Create(nil);
+  try
+    P.Executable := kOpenSSL;
+    for I := 0 to AArgs.Count - 1 do
+      P.Parameters.Add(AArgs[I]);
+    P.Options := [poWaitOnExit];
+    if ANeedOutput then P.Options := P.Options + [poUsePipes];
+    P.Execute;
+    if ANeedOutput then
+    begin
+      repeat
+        N := P.Output.Read(Buf, SizeOf(Buf));
+        if N > 0 then
+        begin
+          SetLength(Tmp, N);
+          Move(Buf[0], Tmp[1], N);
+          AOutput := AOutput + string(Tmp);
+        end;
+      until N <= 0;
+    end;
+    Result := P.ExitStatus = 0;
+  finally
+    P.Free;
+  end;
+end;
+
+procedure TMainForm.CreateNewIdentity(out ACreated: Boolean; out ANewKey: string);
+var
+  Name, Email, Dir, TmpKey, TmpCrt, ArgSubj, Output, FP: string;
+  Args: TStringList;
+  I, P: Integer;
+begin
+  ACreated := False;
+  ANewKey := '';
+  if not AskIdentityParams(Name, Email) then
+  begin
+    // cancelled: step back to "no identity"
+    SelectIdentity(0);
+    Exit;
+  end;
+
+  Dir := IdentsDir;
+  TmpKey := Dir + 'new.key';
+  TmpCrt := Dir + 'new.crt';
+  DeleteFile(TmpKey);
+  DeleteFile(TmpCrt);
+
+  ArgSubj := '/CN=' + Name;
+  if Email <> '' then ArgSubj := ArgSubj + '/emailAddress=' + Email;
+
+  Args := TStringList.Create;
+  try
+    Args.Add('req'); Args.Add('-x509'); Args.Add('-newkey'); Args.Add('rsa:2048');
+    Args.Add('-nodes'); Args.Add('-days'); Args.Add('36500');
+    Args.Add('-keyout'); Args.Add(TmpKey);
+    Args.Add('-out'); Args.Add(TmpCrt);
+    Args.Add('-subj'); Args.Add(ArgSubj);
+    if not RunCli(Args, False, Output) then
+      raise Exception.Create('openssl req failed: ' + Output);
+
+    Args.Clear;
+    Args.Add('x509'); Args.Add('-in'); Args.Add(TmpCrt);
+    Args.Add('-noout'); Args.Add('-fingerprint'); Args.Add('-sha256');
+    if not RunCli(Args, True, Output) then
+      raise Exception.Create('openssl fingerprint failed');
+  finally
+    Args.Free;
+  end;
+
+  // e.g. "SHA256 Fingerprint=82:CC:64:EB:..." -> lowercase hex without colons
+  FP := '';
+  P := LastDelimiter('=', Output);
+  if P > 0 then
+  begin
+    FP := LowerCase(Output);
+    System.Delete(FP, 1, P);
+    while Pos(':', FP) > 0 do System.Delete(FP, Pos(':', FP), 1);
+    FP := Trim(FP);
+  end;
+  if Length(FP) <> 64 then
+    raise Exception.Create('unexpected fingerprint output: ' + Output);
+
+  if not RenameFile(TmpCrt, Dir + FP + '.crt') then
+    raise Exception.Create('cannot save cert file to ' + Dir);
+  if not RenameFile(TmpKey, Dir + FP + '.key') then
+    raise Exception.Create('cannot save key file to ' + Dir);
+
+  ACreated := True;
+  ANewKey := Dir + FP + '.key';
+
+  // refresh the list and select the freshly created identity
+  LoadIdents;
+  for I := 0 to High(FIdents) do
+    if FIdents[I].Key = ANewKey then
+    begin
+      SelectIdentity(I + 1);
+      Break;
+    end;
+end;
+
 procedure TMainForm.GmiMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
 var
   Pt: TPoint;
@@ -346,7 +580,7 @@ begin
   if (Line >= 0) and (Line < Length(FDocLinks)) and (FDocLinks[Line] <> '') then
   begin
     GmiView.Cursor := crHandPoint;
-    if (Line <> FLinkLine) and (FPageStatus <> '') then
+    if (Line <> FLinkLine) and (FDocLinks[Line] <> kNewIdentityCmd) and (FPageStatus <> '') then
       StatusBar.SimpleText := '→ ' + FDocLinks[Line];
   end
   else
@@ -411,6 +645,8 @@ var
   Pt: TPoint;
   Line: Integer;
   Target: string;
+  Created: Boolean;
+  NewKey: string;
 begin
   if Button <> mbLeft then Exit;
   Pt := GmiView.PixelsToRowColumn(Point(X, Y));
@@ -418,7 +654,13 @@ begin
   if (Line >= 0) and (Line < Length(FDocLinks)) then
   begin
     Target := FDocLinks[Line];
-    if Target <> '' then
+    if Target = kNewIdentityCmd then
+    begin
+      CreateNewIdentity(Created, NewKey);
+      if Created then
+        Fetch(FCurrentURL, False);
+    end
+    else if Target <> '' then
       Fetch(Target);
   end;
 end;
@@ -440,6 +682,43 @@ begin
   end;
 end;
 
+procedure TMainForm.PushHistory(const AURL: string);
+begin
+  if AURL = '' then Exit;
+  if (FHistoryPos >= 0) and (FHistoryPos < Length(FHistory)) and
+     (FHistory[FHistoryPos] = AURL) then Exit;
+  SetLength(FHistory, FHistoryPos + 2);
+  Inc(FHistoryPos);
+  FHistory[FHistoryPos] := AURL;
+  UpdateNavButtons;
+end;
+
+procedure TMainForm.UpdateNavButtons;
+begin
+  BackBtn.Enabled := FHistoryPos > 0;
+  FwdBtn.Enabled := (FHistoryPos >= 0) and (FHistoryPos + 1 < Length(FHistory));
+end;
+
+procedure TMainForm.BackClick(Sender: TObject);
+begin
+  if FHistoryPos > 0 then
+  begin
+    Dec(FHistoryPos);
+    UpdateNavButtons;
+    Fetch(FHistory[FHistoryPos], False);
+  end;
+end;
+
+procedure TMainForm.FwdClick(Sender: TObject);
+begin
+  if (FHistoryPos >= 0) and (FHistoryPos + 1 < Length(FHistory)) then
+  begin
+    Inc(FHistoryPos);
+    UpdateNavButtons;
+    Fetch(FHistory[FHistoryPos], False);
+  end;
+end;
+
 procedure TMainForm.GoBtnClick(Sender: TObject);
 begin
   Fetch(Trim(UrlEdit.Text));
@@ -452,6 +731,17 @@ begin
     Key := #0;
     GoBtnClick(Sender);
   end;
+end;
+
+procedure TMainForm.IdentityBoxChange(Sender: TObject);
+var
+  Created: Boolean;
+  NewKey: string;
+begin
+  if FRefreshing then Exit;
+  if IdentityBox.Items.Count = 0 then Exit;
+  if IdentityBox.ItemIndex = IdentityBox.Items.Count - 1 then
+    CreateNewIdentity(Created, NewKey);
 end;
 
 end.
