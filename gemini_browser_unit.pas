@@ -771,7 +771,6 @@ begin
       end;
       GmiView.Invalidate;
       GmiView.Refresh;
-      DumpDiagnostics('/tmp/pishmishraw.txt');
       FPageStatus := '';
       StatusBar.SimpleText := '';
       if APush then PushHistory(AURL);
