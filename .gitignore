@@ -1,6 +1,5 @@
 lib/
 pishmish
-gemini_browser
 *.o
 *.ppu
 *.compiled

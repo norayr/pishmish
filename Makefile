@@ -7,7 +7,7 @@ LAZBUILD := /home/inky/laz/lazarus/lazbuild
 # the IDE config must match the Lazarus tree, otherwise lazbuild fails with
 # 'Package "IdeSynedit" is installed but no valid package file (.lpk) was found'
 LAZCFG    := --primary-config-path=$(HOME)/.lazarus-git --ws=gtk2
-PROJECT  := gemini_browser.lpi
+PROJECT  := pishmish.lpi
 TARGET   := pishmish
 SSL_LIB  := /opt/openssl-1.0.2u/lib
 FLAGS    :=
