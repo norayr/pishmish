@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs,
-  StdCtrls, ExtCtrls, ComCtrls, LCLType, Clipbrd,
+  StdCtrls, ExtCtrls, ComCtrls, LCLType, Clipbrd, Menus,
   Process,
   Math,
   SynEdit, SynEditTypes, SynEditHighlighter,
@@ -73,6 +73,7 @@ type
     FIdents: array of TIdentEntry;
     FDocLinks: array of string;      // line index -> resolved target ('' = not a link)
     FDocLinkEnd: array of Integer;   // line index -> last column of the visible label
+    FDocLinkText: array of string;   // line index -> painted label, measured for the underline
     FLinkLine: Integer;              // hovered link line, -1 = none
     FStarted: Boolean;
     FRefreshing: Boolean;
@@ -83,6 +84,12 @@ type
     FLastRaw: string;
     FDownX: Integer;
     FDownY: Integer;
+    FEditMenu: TPopupMenu;
+    FCopyItem: TMenuItem;
+    procedure EditMenuPopup(Sender: TObject);
+    procedure EditMenuCopyClick(Sender: TObject);
+    procedure EditMenuCutClick(Sender: TObject);
+    procedure EditMenuPasteClick(Sender: TObject);
     function CertSubject(const AFileName: string): string;
     procedure LoadIdents;
     procedure SelectIdentity(AIndex: Integer);
@@ -217,6 +224,8 @@ begin
 end;
 
 procedure TMainForm.FormCreate(Sender: TObject);
+var
+  Itm: TMenuItem;
 begin
   FGemini := TIdGemini.Create(Self);
   FGemtextHL := TGemtextHighlighter.Create(Self);
@@ -235,6 +244,25 @@ begin
   GmiView.OnCutCopy := GmiCopy;
   GmiView.OnMouseUp := GmiMouseUp;
   GmiView.OnMouseDown := GmiMouseDown;
+  FEditMenu := TPopupMenu.Create(Self);
+  Itm := TMenuItem.Create(Self);
+  Itm.Caption := 'Cu&t';
+  Itm.OnClick := EditMenuCutClick;
+  FEditMenu.Items.Add(Itm);
+  Itm := TMenuItem.Create(Self);
+  Itm.Caption := '&Copy';
+  Itm.OnClick := EditMenuCopyClick;
+  FEditMenu.Items.Add(Itm);
+  FCopyItem := Itm;
+  Itm := TMenuItem.Create(Self);
+  Itm.Caption := 'Paste';
+  Itm.OnClick := EditMenuPasteClick;
+  FEditMenu.Items.Add(Itm);
+  Itm := TMenuItem.Create(Self);
+  Itm.Caption := 'Select &All';
+  FEditMenu.Items.Add(Itm);
+  FEditMenu.OnPopup := EditMenuPopup;
+  GmiView.PopupMenu := FEditMenu;
   // Ctrl + mouse wheel zooms the text (same as heliko)
   GmiView.OnMouseWheel := FormMouseWheel;
   OnMouseWheel := FormMouseWheel;
@@ -255,6 +283,28 @@ end;
 
 procedure TMainForm.FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
+  if (ssCtrl in Shift) and (Key = VK_X) then
+  begin
+    if GmiView.SelAvail then
+    begin
+      try
+        Clipboard.AsText := GmiView.SelText;
+        GmiView.SelText := '';
+      except
+      end;
+      Key := 0;
+    end;
+    Exit;
+  end;
+  if (ssCtrl in Shift) and (Key = VK_C) then
+  begin
+    if GmiView.SelAvail then
+    begin
+      Clipboard.AsText := GmiView.SelText;
+      Key := 0;
+    end;
+    Exit;
+  end;
   // debug aid: dump the raw + rendered page so the Dashboar line can be inspected
   if (ssCtrl in Shift) and (ssShift in Shift) and (Key = VK_D) then
   begin
@@ -475,8 +525,10 @@ begin
   begin
     SetLength(FDocLinks, LineNo + 1);
     SetLength(FDocLinkEnd, LineNo + 1);
+    SetLength(FDocLinkText, LineNo + 1);
   end;
   FDocLinks[LineNo] := kNewIdentityCmd;
+  FDocLinkText[LineNo] := S;
   FDocLinkEnd[LineNo] := Utf8Col(S);
 end;
 
@@ -542,8 +594,10 @@ var
           begin
             SetLength(FDocLinks, LineNo + 1);
             SetLength(FDocLinkEnd, LineNo + 1);
+            SetLength(FDocLinkText, LineNo + 1);
           end;
           FDocLinks[LineNo] := ALinkTarget;
+          FDocLinkText[LineNo] := LineTxt;
           L := CountChars(LineTxt);
           if L > ALinkEnd then L := ALinkEnd;
           FDocLinkEnd[LineNo] := L;
@@ -572,8 +626,10 @@ var
         begin
           SetLength(FDocLinks, LineNo + 1);
           SetLength(FDocLinkEnd, LineNo + 1);
+          SetLength(FDocLinkText, LineNo + 1);
         end;
         FDocLinks[LineNo] := ALinkTarget;
+        FDocLinkText[LineNo] := Pre + Piece;
         L := CountChars(Pre + Piece);
         if L > ALinkEnd then L := ALinkEnd;
         FDocLinkEnd[LineNo] := L;
@@ -591,6 +647,9 @@ begin
   try
     SetLength(FDocLinks, 0);
     SetLength(FDocLinkEnd, 0);
+    SetLength(FDocLinkText, 0);
+    // the hovered line index no longer refers to the new page
+    FLinkLine := -1;
     GW := 0;
     if GmiView.Gutter.Visible then
       GW := GmiView.Gutter.Width;
@@ -845,7 +904,44 @@ procedure TMainForm.GmiCopy(Sender: TObject; var AText: string;
   var AnAction: TSynCopyPasteAction);
 begin
   if GmiView.SelAvail then
+  begin
     Clipboard.AsText := GmiView.SelText;
+    // SynEdit clears the clipboard right after this handler returns
+    AnAction := scaAbort;
+  end;
+end;
+
+procedure TMainForm.EditMenuCopyClick(Sender: TObject);
+begin
+  if GmiView.SelAvail then
+  begin
+    try
+      Clipboard.AsText := GmiView.SelText;
+    except
+    end;
+  end;
+end;
+
+procedure TMainForm.EditMenuCutClick(Sender: TObject);
+begin
+  if GmiView.SelAvail then
+  begin
+    try
+      Clipboard.AsText := GmiView.SelText;
+      GmiView.SelText := '';
+    except
+    end;
+  end;
+end;
+
+procedure TMainForm.EditMenuPasteClick(Sender: TObject);
+begin
+  GmiView.PasteFromClipboard;
+end;
+
+procedure TMainForm.EditMenuPopup(Sender: TObject);
+begin
+  FCopyItem.Enabled := GmiView.SelAvail;
 end;
 
 procedure TMainForm.GmiMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
@@ -903,7 +999,11 @@ begin
 
   LineY := (FLinkLine - GmiView.TopLine + 1) * GmiView.LineHeight;
   StartX := GutterWidth + (1 - GmiView.LeftChar) * GmiView.CharWidth;
-  EndX := GutterWidth + (FDocLinkEnd[FLinkLine] + 1 - GmiView.LeftChar) * GmiView.CharWidth;
+  // measure the painted label: cell counting is wrong for double-width glyphs
+  if (FLinkLine < Length(FDocLinkText)) and (FDocLinkText[FLinkLine] <> '') then
+    EndX := StartX + ACanvas.TextWidth(FDocLinkText[FLinkLine])
+  else
+    EndX := GutterWidth + (FDocLinkEnd[FLinkLine] + 1 - GmiView.LeftChar) * GmiView.CharWidth;
 
   if StartX < GutterWidth then StartX := GutterWidth;
   if EndX > GmiView.ClientWidth then EndX := GmiView.ClientWidth;
