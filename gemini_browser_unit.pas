@@ -7,7 +7,7 @@ interface
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs,
   StdCtrls, ExtCtrls, ComCtrls, LCLType, Clipbrd, Menus,
-  Process,
+  Process, LCLIntf,
   Math,
   SynEdit, SynEditTypes, SynEditHighlighter,
   IdGlobal, IdSSL, IdSSLOpenSSL, IdSSLOpenSSLHeaders, IdGemini, IdURI;
@@ -86,10 +86,14 @@ type
     FDownY: Integer;
     FEditMenu: TPopupMenu;
     FCopyItem: TMenuItem;
+    FOpenLinkItem: TMenuItem;
+    FRightLink: string;               // link under the right-clicked position
     procedure EditMenuPopup(Sender: TObject);
     procedure EditMenuCopyClick(Sender: TObject);
     procedure EditMenuCutClick(Sender: TObject);
     procedure EditMenuPasteClick(Sender: TObject);
+    procedure OpenLinkInNewWindowClick(Sender: TObject);
+    procedure OpenInNewWindow(const AURL: string);
     function CertSubject(const AFileName: string): string;
     procedure LoadIdents;
     procedure SelectIdentity(AIndex: Integer);
@@ -227,6 +231,9 @@ procedure TMainForm.FormCreate(Sender: TObject);
 var
   Itm: TMenuItem;
 begin
+  // 'pishmish <url>' opens that page, used by 'open link in new window'
+  if (ParamCount > 0) and (ParamStr(1) <> '') and (ParamStr(1)[1] <> '-') then
+    UrlEdit.Text := ParamStr(1);
   FGemini := TIdGemini.Create(Self);
   FGemtextHL := TGemtextHighlighter.Create(Self);
   KeyPreview := True;
@@ -261,6 +268,12 @@ begin
   Itm := TMenuItem.Create(Self);
   Itm.Caption := 'Select &All';
   FEditMenu.Items.Add(Itm);
+  FEditMenu.Items.Add(TMenuItem.Create(Self));
+  Itm := TMenuItem.Create(Self);
+  Itm.Caption := 'Open &link in new window';
+  Itm.OnClick := OpenLinkInNewWindowClick;
+  FEditMenu.Items.Add(Itm);
+  FOpenLinkItem := Itm;
   FEditMenu.OnPopup := EditMenuPopup;
   GmiView.PopupMenu := FEditMenu;
   // Ctrl + mouse wheel zooms the text (same as heliko)
@@ -283,6 +296,12 @@ end;
 
 procedure TMainForm.FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
+  if (ssCtrl in Shift) and (Key = VK_N) then
+  begin
+    Key := 0;
+    OpenInNewWindow('');
+    Exit;
+  end;
   if (ssCtrl in Shift) and (Key = VK_X) then
   begin
     if GmiView.SelAvail then
@@ -941,6 +960,7 @@ end;
 procedure TMainForm.EditMenuPopup(Sender: TObject);
 begin
   FCopyItem.Enabled := GmiView.SelAvail;
+  FOpenLinkItem.Enabled := FRightLink <> '';
 end;
 
 procedure TMainForm.GmiMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
@@ -1018,12 +1038,55 @@ end;
 
 procedure TMainForm.GmiMouseDown(Sender: TObject; Button: TMouseButton;
   Shift: TShiftState; X, Y: Integer);
+var
+  Pt: TPoint;
+  Line: Integer;
 begin
   if Button = mbLeft then
   begin
     FDownX := X;
     FDownY := Y;
   end;
+  // remember the link under the cursor, the context menu is built in OnPopup
+  // where the mouse position is not available anymore
+  FRightLink := '';
+  Pt := GmiView.PixelsToRowColumn(Point(X, Y));
+  Line := Pt.Y - 1;
+  if (Line >= 0) and (Line < Length(FDocLinks)) and
+     (FDocLinks[Line] <> '') and (FDocLinks[Line] <> kNewIdentityCmd) then
+    FRightLink := FDocLinks[Line];
+end;
+
+procedure TMainForm.OpenInNewWindow(const AURL: string);
+var
+  Proc: TProcess;
+  Exe: string;
+begin
+  if Copy(AURL, 1, 7) = 'http://' then
+  begin
+    // a gemtext client cannot fetch it, let the desktop handle it
+    OpenURL(AURL);
+    Exit;
+  end;
+  Exe := ParamStr(0);
+  if not FileExists(Exe) then
+    Exe := Application.ExeName;
+  // a second process, so the new window has its own history
+  Proc := TProcess.Create(nil);
+  try
+    Proc.Executable := Exe;
+    if AURL <> '' then
+      Proc.Parameters.Add(AURL);
+    Proc.Options := [poNoConsole, poDetached];
+    Proc.Execute;
+  finally
+    Proc.Free;
+  end;
+end;
+
+procedure TMainForm.OpenLinkInNewWindowClick(Sender: TObject);
+begin
+  OpenInNewWindow(FRightLink);
 end;
 
 procedure TMainForm.GmiMouseUp(Sender: TObject; Button: TMouseButton;
