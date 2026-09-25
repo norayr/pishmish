@@ -6,15 +6,47 @@ interface
 
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs,
-  StdCtrls, ExtCtrls, ComCtrls,
+  StdCtrls, ExtCtrls, ComCtrls, LCLType, Clipbrd,
   Process,
-  SynEdit,
+  Math,
+  SynEdit, SynEditTypes, SynEditHighlighter,
   IdGlobal, IdSSL, IdSSLOpenSSL, IdSSLOpenSSLHeaders, IdGemini, IdURI;
 
 type
   TIdentEntry = record
     LabelText: string;
     Crt, Key: string;
+  end;
+
+  TGemtextHighlighter = class(TSynCustomHighlighter)
+  private
+    FBoldAttr: TSynHighlighterAttributes;
+    FPreAttr: TSynHighlighterAttributes;
+    FNormalAttr: TSynHighlighterAttributes;
+    FKinds: array of SmallInt;
+    FLine: string;
+    FLineLen: Integer;
+    FTokenPos: Integer;
+    FCursor: Integer;
+    FEol: Boolean;
+    FCurKind: SmallInt;
+  protected
+    function GetIdentChars: TSynIdentChars; override;
+  public
+    constructor Create(AOwner: TComponent); override;
+    procedure SetLine(const NewValue: String; LineNumber: Integer); override;
+    function GetEol: Boolean; override;
+    procedure Next; override;
+    function GetToken: String; override;
+    procedure GetTokenEx(out TokenStart: PChar; out TokenLength: Integer); override;
+    function GetTokenAttribute: TSynHighlighterAttributes; override;
+    function GetTokenKind: Integer; override;
+    function GetTokenPos: Integer; override;
+    function GetDefaultAttribute(Index: Integer): TSynHighlighterAttributes; override;
+    function GetRange: Pointer; override;
+    procedure ResetRange; override;
+    procedure SetRange(Value: Pointer); override;
+    procedure SetLineKinds(const AKinds: array of SmallInt);
   end;
 
   TMainForm = class(TForm)
@@ -46,6 +78,11 @@ type
     FRefreshing: Boolean;
     FHistory: array of string;
     FHistoryPos: Integer;
+    FGemtextHL: TGemtextHighlighter;
+    FLineKind: array of SmallInt;
+    FLastRaw: string;
+    FDownX: Integer;
+    FDownY: Integer;
     function CertSubject(const AFileName: string): string;
     procedure LoadIdents;
     procedure SelectIdentity(AIndex: Integer);
@@ -54,11 +91,19 @@ type
     procedure Render(const ABody: string);
     procedure AddCreateIdentityHint;
     procedure GmiMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
+    procedure GmiMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
     procedure GmiMouseLeave(Sender: TObject);
     procedure GmiPaint(Sender: TObject; ACanvas: TCanvas);
     procedure GmiMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+    procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+    procedure DumpDiagnostics(const APath: string);
+    procedure GmiCopy(Sender: TObject; var AText: string;
+      var AMode: TSynSelectionMode; ALogStartPos: TPoint;
+      var AnAction: TSynCopyPasteAction);
     procedure FormMouseWheel(Sender: TObject; Shift: TShiftState;
       WheelDelta: Integer; MousePos: TPoint; var Handled: Boolean);
+    procedure GmiResize(Sender: TObject);
+    function Utf8Col(const S: string): Integer;
     procedure PushHistory(const AURL: string);
     procedure UpdateNavButtons;
     function RunCli(const AArgs: TStringList; ANeedOutput: Boolean; out AOutput: string): Boolean;
@@ -100,6 +145,19 @@ begin
   SetLength(Buf, AStream.Size);
   AStream.ReadBuffer(Buf[0], Length(Buf));
   Result := TEncoding.UTF8.GetString(Buf);
+end;
+
+procedure WriteStringToFile(const APath, AContent: string);
+var
+  F: TFileStream;
+begin
+  F := TFileStream.Create(APath, fmCreate);
+  try
+    if AContent <> '' then
+      F.Write(AContent[1], Length(AContent));
+  finally
+    F.Free;
+  end;
 end;
 
 function AskIdentityParams(out AName, AEmail: string): Boolean;
@@ -161,6 +219,9 @@ end;
 procedure TMainForm.FormCreate(Sender: TObject);
 begin
   FGemini := TIdGemini.Create(Self);
+  FGemtextHL := TGemtextHighlighter.Create(Self);
+  KeyPreview := True;
+  OnKeyDown := FormKeyDown;
   LoadIdents;
   IdentityBox.ItemIndex := 0;
   FLinkLine := -1;
@@ -171,10 +232,16 @@ begin
   GmiView.OnMouseMove := GmiMouseMove;
   GmiView.OnMouseLeave := GmiMouseLeave;
   GmiView.OnPaint := GmiPaint;
+  GmiView.OnCutCopy := GmiCopy;
   GmiView.OnMouseUp := GmiMouseUp;
+  GmiView.OnMouseDown := GmiMouseDown;
   // Ctrl + mouse wheel zooms the text (same as heliko)
   GmiView.OnMouseWheel := FormMouseWheel;
   OnMouseWheel := FormMouseWheel;
+  // re-wrap the page to the window width when the view is resized
+  GmiView.OnResize := GmiResize;
+  // same initial font sizing as heliko, so zoom starts from a sane size
+  GmiView.Font.Size := Max(12, Min(Round(Screen.Height / 60 * (PixelsPerInch / 96)), 36));
 end;
 
 procedure TMainForm.FormShow(Sender: TObject);
@@ -186,8 +253,85 @@ begin
   end;
 end;
 
+procedure TMainForm.FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+begin
+  // debug aid: dump the raw + rendered page so the Dashboar line can be inspected
+  if (ssCtrl in Shift) and (ssShift in Shift) and (Key = VK_D) then
+  begin
+    Key := 0;
+    if FLastRaw <> '' then
+    begin
+      DumpDiagnostics('/tmp/pishmishraw.txt');
+      StatusBar.SimpleText := 'raw page saved to /tmp/pishmishraw.txt';
+    end;
+  end;
+end;
+
+function TMainForm.Utf8Col(const S: string): Integer;
+var
+  Ix: Integer;
+  B: Byte;
+begin
+  Result := 0;
+  Ix := 1;
+  while Ix <= Length(S) do
+  begin
+    Inc(Result);
+    B := Ord(S[Ix]);
+    if B < 128 then Inc(Ix)
+    else if (B and $E0) = $C0 then Inc(Ix, 2)
+    else if (B and $F0) = $E0 then Inc(Ix, 3)
+    else if (B and $F8) = $F0 then Inc(Ix, 4)
+    else Inc(Ix);
+  end;
+end;
+
+procedure TMainForm.GmiResize(Sender: TObject);
+begin
+  // re-flow the currently displayed page to the new window width
+  if FRefreshing or (FLastRaw = '') then Exit;
+  FRefreshing := True;
+  try
+    GmiView.Lines.BeginUpdate;
+    try
+      GmiView.Lines.Text := '';
+      Render(FLastRaw);
+    finally
+      GmiView.Lines.EndUpdate;
+    end;
+    GmiView.Invalidate;
+    GmiView.Refresh;
+  finally
+    FRefreshing := False;
+  end;
+end;
+
+procedure TMainForm.DumpDiagnostics(const APath: string);
+var
+  SL: TStringList;
+  I: Integer;
+begin
+  SL := TStringList.Create;
+  try
+    SL.Add('===== raw content from server =====');
+    SL.Text := SL.Text + FLastRaw;
+    SL.Add('');
+    SL.Add('===== rendered SynEdit buffer =====');
+    SL.Add(GmiView.Text);
+    SL.Add('');
+    SL.Add('===== rendered lines with byte lengths =====');
+    for I := 0 to GmiView.Lines.Count - 1 do
+      SL.Add(IntToStr(I) + ': [' + IntToStr(Length(GmiView.Lines[I])) + '] <' +
+        GmiView.Lines[I] + '>');
+    SL.SaveToFile(APath);
+  finally
+    SL.Free;
+  end;
+end;
+
 procedure TMainForm.FormDestroy(Sender: TObject);
 begin
+  GmiView.Highlighter := nil;
   FreeAndNil(FGemini);
 end;
 
@@ -333,67 +477,186 @@ begin
     SetLength(FDocLinkEnd, LineNo + 1);
   end;
   FDocLinks[LineNo] := kNewIdentityCmd;
-  FDocLinkEnd[LineNo] := Length(S);
+  FDocLinkEnd[LineNo] := Utf8Col(S);
 end;
 
 procedure TMainForm.Render(const ABody: string);
+label
+  nxtline;
 var
   SL: TStringList;
-  I, LineNo: Integer;
   L, Target, LabelTxt: string;
-  P: Integer;
+  I, P, T, NumHashes, LineNo: Integer;
   InPre: Boolean;
-begin
-  SL := TStringList.Create;
-  try
-    SetLength(FDocLinks, 0);
-    SetLength(FDocLinkEnd, 0);
-    SL.Text := ABody;
-    InPre := False;
-    for I := 0 to SL.Count - 1 do
+  FitChars, GW: Integer;
+
+  function CountChars(const S: string): Integer;
+  begin
+    Result := Utf8Col(S);
+  end;
+
+  function StepAt(const S: string; Ix: Integer): Integer;
+  var
+    B: Byte;
+  begin
+    B := Ord(S[Ix]);
+    if B < 128 then Result := 1
+    else if (B and $E0) = $C0 then Result := 2
+    else if (B and $F0) = $E0 then Result := 3
+    else if (B and $F8) = $F0 then Result := 4
+    else Result := 1;
+  end;
+
+  procedure AddLine(const ATxt: string; AKind: SmallInt);
+  begin
+    GmiView.Lines.Add(ATxt);
+    SetLength(FLineKind, GmiView.Lines.Count);
+    FLineKind[GmiView.Lines.Count - 1] := AKind;
+  end;
+
+  // Emit ATxt, wrapping at word boundaries to the window width. Continuation
+  // lines get AContIndent (2 spaces for non-links, '' for links). Only the
+  // first physical line of a link carries the clickable span.
+  procedure EmitWrapped(ATxt: string; AKind: SmallInt; const AContIndent: string;
+    AIsLink: Boolean; const ALinkTarget: string; ALinkEnd: Integer);
+  var
+    Rest, Piece, Pre, LineTxt: string;
+    Limit, Take, N, Ix, LastBreak, L: Integer;
+    First: Boolean;
+  begin
+    Rest := ATxt;
+    Pre := '';
+    First := True;
+    while True do
     begin
-      L := SL[I];
-      if (Length(L) >= 3) and (Copy(L, 1, 3) = '```') then
+      Limit := FitChars - CountChars(Pre);
+      if Limit < 1 then Limit := 1;
+      if CountChars(Rest) <= Limit then
       begin
-        InPre := not InPre;
-        GmiView.Lines.Add('');
-        Continue;
-      end;
-      if InPre then
-      begin
-        GmiView.Lines.Add(L);
-        Continue;
-      end;
-      if Copy(L, 1, 2) = '=>' then
-      begin
-        // rocketlink: '=>' followed directly (or after whitespace) by the URL.
-        // Show only the label (the URL is the hover/tooltip + status bar);
-        // if there is no label, show the URL itself. The clickable span is
-        // the visible label.
-        L := Trim(Copy(L, 3));
-        if L = '' then Continue;
-        P := 1;
-        while (P <= Length(L)) and (L[P] <> ' ') do Inc(P);
-        Target := Trim(Copy(L, 1, P - 1));
-        LabelTxt := Trim(Copy(L, P + 1));
-        if LabelTxt = '' then LabelTxt := Target;
+        LineTxt := Pre + Rest;
         LineNo := GmiView.Lines.Count;
-        GmiView.Lines.Add(LabelTxt);
+        AddLine(LineTxt, AKind);
+        if First and AIsLink then
+        begin
+          if LineNo >= Length(FDocLinks) then
+          begin
+            SetLength(FDocLinks, LineNo + 1);
+            SetLength(FDocLinkEnd, LineNo + 1);
+          end;
+          FDocLinks[LineNo] := ALinkTarget;
+          L := CountChars(LineTxt);
+          if L > ALinkEnd then L := ALinkEnd;
+          FDocLinkEnd[LineNo] := L;
+        end;
+        Break;
+      end;
+      // find the last space within the first Limit chars
+      LastBreak := 0;
+      N := 0;
+      Ix := 1;
+      while (N < Limit) and (Ix <= Length(Rest)) do
+      begin
+        if Rest[Ix] = ' ' then LastBreak := Ix;
+        Ix := Ix + StepAt(Rest, Ix);
+        Inc(N);
+      end;
+      if LastBreak > 0 then Take := LastBreak
+      else Take := Ix - 1;
+      if Take < 1 then Take := 1;
+      Piece := TrimRight(Copy(Rest, 1, Take));
+      LineNo := GmiView.Lines.Count;
+      AddLine(Pre + Piece, AKind);
+      if First and AIsLink then
+      begin
         if LineNo >= Length(FDocLinks) then
         begin
           SetLength(FDocLinks, LineNo + 1);
           SetLength(FDocLinkEnd, LineNo + 1);
         end;
-        FDocLinks[LineNo] := ResolveLink(Target);
-        FDocLinkEnd[LineNo] := Length(LabelTxt);
-        Continue;
+        FDocLinks[LineNo] := ALinkTarget;
+        L := CountChars(Pre + Piece);
+        if L > ALinkEnd then L := ALinkEnd;
+        FDocLinkEnd[LineNo] := L;
       end;
-      if L = '' then Continue;
-      if L[1] = '#' then
-        GmiView.Lines.Add(TrimLeft(Copy(L, 2)))
-      else
-        GmiView.Lines.Add(L);
+      First := False;
+      Rest := Copy(Rest, Take + 1, MaxInt);
+      Pre := AContIndent;
+      if Rest = '' then Break;
     end;
+  end;
+
+begin
+  SL := TStringList.Create;
+  SetLength(FLineKind, 0);
+  try
+    SetLength(FDocLinks, 0);
+    SetLength(FDocLinkEnd, 0);
+    GW := 0;
+    if GmiView.Gutter.Visible then
+      GW := GmiView.Gutter.Width;
+    FitChars := Max(8, (GmiView.ClientWidth - GW) div GmiView.CharWidth);
+    SL.Text := ABody;
+    InPre := False;
+    for I := 0 to SL.Count - 1 do
+    begin
+      L := SL[I];
+      // preformatted block fences (```) - content is non-link text so it is
+      // indented; the block keeps a light background like Lagrange
+      if (Length(L) >= 3) and (Copy(L, 1, 3) = '```') then
+      begin
+        InPre := not InPre;
+        EmitWrapped('', 0, '  ', False, '', 0);
+        goto nxtline;
+      end;
+      if InPre then
+      begin
+        EmitWrapped('  ' + L, 2, '  ', False, '', 0);
+        goto nxtline;
+      end;
+      if Copy(L, 1, 2) = '=>' then
+      begin
+        // links are shown bold; display only the label (the URL is the
+        // hover/tooltip + status bar); if there is no label, show the URL.
+        L := Trim(Copy(L, 3));
+        if L = '' then
+        begin
+          EmitWrapped('', 0, '  ', False, '', 0);
+          goto nxtline;
+        end;
+        P := 1;
+        while (P <= Length(L)) and (L[P] <> ' ') do Inc(P);
+        Target := Trim(Copy(L, 1, P - 1));
+        LabelTxt := Trim(Copy(L, P + 1));
+        if LabelTxt = '' then LabelTxt := Target;
+        EmitWrapped(LabelTxt, 1, '', True, ResolveLink(Target), CountChars(LabelTxt));
+        goto nxtline;
+      end;
+      // gemtext headings: markers stripped, shown like plain text
+      // (2-space indent, no bold)
+      if (Length(L) > 0) and (L[1] = '#') then
+      begin
+        NumHashes := 0;
+        T := 1;
+        while (T <= Length(L)) and (L[T] = '#') do
+        begin
+          Inc(NumHashes);
+          Inc(T);
+        end;
+        while (T <= Length(L)) and (L[T] = ' ') do Inc(T);
+        if NumHashes in [1..3] then
+        begin
+          EmitWrapped('  ' + Trim(Copy(L, T, Length(L) - T + 1)), 0, '  ', False, '', 0);
+          goto nxtline;
+        end;
+      end;
+      if Trim(L) = '' then
+        EmitWrapped('', 0, '  ', False, '', 0)
+      else
+        EmitWrapped('  ' + L, 0, '  ', False, '', 0);
+    nxtline:
+    end;
+    FGemtextHL.SetLineKinds(FLineKind);
+    GmiView.Highlighter := FGemtextHL;
   finally
     SL.Free;
   end;
@@ -432,15 +695,24 @@ begin
 
       FCurrentURL := AURL;
       UrlEdit.Text := AURL;
-      GmiView.Lines.BeginUpdate;
+      FLastRaw := StreamToUtf8(R.Content);
+      FRefreshing := True;
       try
-        GmiView.Lines.Text := '';
-        Render(StreamToUtf8(R.Content));
-        if R.Status = IdGemini.gsCertRequired then
-          AddCreateIdentityHint;
+        GmiView.Lines.BeginUpdate;
+        try
+          GmiView.Lines.Text := '';
+          Render(FLastRaw);
+          if R.Status = IdGemini.gsCertRequired then
+            AddCreateIdentityHint;
+        finally
+          GmiView.Lines.EndUpdate;
+        end;
       finally
-        GmiView.Lines.EndUpdate;
+        FRefreshing := False;
       end;
+      GmiView.Invalidate;
+      GmiView.Refresh;
+      DumpDiagnostics('/tmp/pishmishraw.txt');
       FPageStatus := '';
       StatusBar.SimpleText := '';
       if APush then PushHistory(AURL);
@@ -568,6 +840,14 @@ begin
     end;
 end;
 
+procedure TMainForm.GmiCopy(Sender: TObject; var AText: string;
+  var AMode: TSynSelectionMode; ALogStartPos: TPoint;
+  var AnAction: TSynCopyPasteAction);
+begin
+  if GmiView.SelAvail then
+    Clipboard.AsText := GmiView.SelText;
+end;
+
 procedure TMainForm.GmiMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
 var
   Pt: TPoint;
@@ -610,16 +890,16 @@ procedure TMainForm.GmiPaint(Sender: TObject; ACanvas: TCanvas);
 var
   GutterWidth, StartX, EndX, LineY: Integer;
 begin
+  GutterWidth := 0;
+  if GmiView.Gutter.Visible then
+    GutterWidth := GmiView.Gutter.Width;
+
   // heliko-style underline under the hovered rocketlink label
   if (FLinkLine < 0) or (FLinkLine >= Length(FDocLinks)) or (FDocLinks[FLinkLine] = '') then
     Exit;
   if (FLinkLine < GmiView.TopLine - 1) or
      (FLinkLine >= GmiView.TopLine + GmiView.LinesInWindow) then
     Exit;
-
-  GutterWidth := 0;
-  if GmiView.Gutter.Visible then
-    GutterWidth := GmiView.Gutter.Width;
 
   LineY := (FLinkLine - GmiView.TopLine + 1) * GmiView.LineHeight;
   StartX := GutterWidth + (1 - GmiView.LeftChar) * GmiView.CharWidth;
@@ -637,6 +917,16 @@ begin
   end;
 end;
 
+procedure TMainForm.GmiMouseDown(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+begin
+  if Button = mbLeft then
+  begin
+    FDownX := X;
+    FDownY := Y;
+  end;
+end;
+
 procedure TMainForm.GmiMouseUp(Sender: TObject; Button: TMouseButton;
   Shift: TShiftState; X, Y: Integer);
 var
@@ -647,6 +937,8 @@ var
   NewKey: string;
 begin
   if Button <> mbLeft then Exit;
+  // a drag is a text selection for copying; only a plain click opens a link
+  if (Abs(X - FDownX) + Abs(Y - FDownY) > 5) or GmiView.SelAvail then Exit;
   Pt := GmiView.PixelsToRowColumn(Point(X, Y));
   Line := Pt.Y - 1;
   if (Line >= 0) and (Line < Length(FDocLinks)) then
@@ -673,8 +965,8 @@ begin
     NewSize := GmiView.Font.Size;
     if WheelDelta > 0 then
       NewSize := NewSize + 2
-    else if NewSize > 8 then
-      NewSize := NewSize - 2;
+    else
+      NewSize := Max(8, NewSize - 2);
     GmiView.Font.Size := NewSize;
     Handled := True;
   end;
@@ -740,6 +1032,130 @@ begin
   if IdentityBox.Items.Count = 0 then Exit;
   if IdentityBox.ItemIndex = IdentityBox.Items.Count - 1 then
     CreateNewIdentity(Created, NewKey);
+end;
+
+{ TGemtextHighlighter }
+
+constructor TGemtextHighlighter.Create(AOwner: TComponent);
+begin
+  inherited Create(AOwner);
+  FBoldAttr := TSynHighlighterAttributes.Create('gemtext_bold');
+  FBoldAttr.Style := [fsBold];
+  AddAttribute(FBoldAttr);
+  FPreAttr := TSynHighlighterAttributes.Create('gemtext_pre');
+  FPreAttr.Background := $ECECEC;
+  AddAttribute(FPreAttr);
+  FNormalAttr := TSynHighlighterAttributes.Create('gemtext_normal');
+  AddAttribute(FNormalAttr);
+end;
+
+function TGemtextHighlighter.GetIdentChars: TSynIdentChars;
+begin
+  Result := ['0'..'9', 'a'..'z', 'A'..'Z', '#', '_', '/', '-', '.', '~'];
+end;
+
+procedure TGemtextHighlighter.SetLine(const NewValue: String; LineNumber: Integer);
+begin
+  inherited SetLine(NewValue, LineNumber);
+  FLine := NewValue;
+  FLineLen := Length(NewValue);
+  FTokenPos := 0;
+  FCursor := 0;
+  FEol := False;
+  if (LineNumber >= 0) and (LineNumber < Length(FKinds)) then
+    FCurKind := FKinds[LineNumber]
+  else
+    FCurKind := 0;
+  Next;
+end;
+
+function TGemtextHighlighter.GetEol: Boolean;
+begin
+  Result := FEol;
+end;
+
+procedure TGemtextHighlighter.Next;
+begin
+  if FEol then Exit;
+  FTokenPos := FCursor;
+  if FCursor >= FLineLen then
+    FEol := True
+  else
+    FCursor := FLineLen;
+end;
+
+function TGemtextHighlighter.GetToken: String;
+begin
+  if FEol then
+    Result := ''
+  else
+    Result := Copy(FLine, FTokenPos + 1, FCursor - FTokenPos);
+end;
+
+procedure TGemtextHighlighter.GetTokenEx(out TokenStart: PChar; out TokenLength: Integer);
+begin
+  if FEol then
+  begin
+    TokenStart := PChar(FLine);
+    TokenLength := 0;
+  end
+  else
+  begin
+    TokenStart := PChar(FLine) + FTokenPos;
+    TokenLength := FCursor - FTokenPos;
+  end;
+end;
+
+function TGemtextHighlighter.GetTokenAttribute: TSynHighlighterAttributes;
+begin
+  if FEol then
+    Result := FNormalAttr
+  else
+    case FCurKind of
+      1: Result := FBoldAttr; // links
+      2: Result := FPreAttr;  // preformatted, keeps the indent
+    else
+      Result := FNormalAttr;
+    end;
+end;
+
+function TGemtextHighlighter.GetTokenKind: Integer;
+begin
+  Result := FCurKind;
+end;
+
+function TGemtextHighlighter.GetTokenPos: Integer;
+begin
+  Result := FTokenPos;
+end;
+
+function TGemtextHighlighter.GetDefaultAttribute(Index: Integer): TSynHighlighterAttributes;
+begin
+  Result := FNormalAttr;
+end;
+
+function TGemtextHighlighter.GetRange: Pointer;
+begin
+  Result := nil;
+end;
+
+procedure TGemtextHighlighter.ResetRange;
+begin
+end;
+
+procedure TGemtextHighlighter.SetRange(Value: Pointer);
+begin
+end;
+
+procedure TGemtextHighlighter.SetLineKinds(const AKinds: array of SmallInt);
+var
+  I, N: Integer;
+begin
+  N := High(AKinds);
+  if N < 0 then N := -1;
+  SetLength(FKinds, N + 1);
+  for I := 0 to N do
+    FKinds[I] := AKinds[I];
 end;
 
 end.

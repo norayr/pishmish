@@ -19,6 +19,9 @@ build:
 run: build
 	LD_LIBRARY_PATH=$(SSL_LIB) ./$(TARGET)
 
+test:
+	LD_LIBRARY_PATH=/opt/openssl-1.0.2u/lib ./pishmish
+
 clean:
 	rm -f $(TARGET)
 	rm -rf lib
