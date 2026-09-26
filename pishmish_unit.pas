@@ -97,6 +97,7 @@ type
     procedure SelectIdentity(AIndex: Integer);
     function ResolveLink(const ARelative: string): string;
     procedure Fetch(const AURL: string; APush: Boolean = True);
+    function NormalizeURL(const AURL: string): string;
     procedure Render(const ABody: string);
     procedure AddCreateIdentityHint;
     procedure GmiMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
@@ -727,13 +728,26 @@ begin
   end;
 end;
 
+// a host without a scheme means gemini, like a browser assumes http
+function TMainForm.NormalizeURL(const AURL: string): string;
+var
+  S: string;
+begin
+  S := Trim(AURL);
+  if (S <> '') and (Pos('://', S) = 0) then
+    S := 'gemini://' + S;
+  Result := S;
+end;
+
 procedure TMainForm.Fetch(const AURL: string; APush: Boolean = True);
 var
   R: TGeminiResponse;
   Input: string;
+  U: string;
 begin
-  if AURL = '' then Exit;
-  StatusBar.SimpleText := 'Connecting to ' + AURL + ' ...';
+  U := NormalizeURL(AURL);
+  if U = '' then Exit;
+  StatusBar.SimpleText := 'Connecting to ' + U + ' ...';
   try
     if IdentityBox.ItemIndex > 0 then
     begin
@@ -746,7 +760,7 @@ begin
       FGemini.SSLIOHandler.SSLOptions.KeyFile := '';
     end;
 
-    R := FGemini.Request(AURL);
+    R := FGemini.Request(U);
     try
       if (R.Status = IdGemini.gsInput) or (R.Status = IdGemini.gsSensitiveInput) then
       begin
@@ -754,12 +768,12 @@ begin
         if InputQuery('Input required', R.Meta, Input) then
         begin
           R.Free;
-          R := FGemini.Request(AURL, Input);
+          R := FGemini.Request(U, Input);
         end;
       end;
 
-      FCurrentURL := AURL;
-      UrlEdit.Text := AURL;
+      FCurrentURL := U;
+      UrlEdit.Text := U;
       FLastRaw := StreamToUtf8(R.Content);
       FRefreshing := True;
       try
@@ -779,7 +793,7 @@ begin
       GmiView.Refresh;
       FPageStatus := '';
       StatusBar.SimpleText := '';
-      if APush then PushHistory(AURL);
+      if APush then PushHistory(U);
     finally
       R.Free;
     end;
