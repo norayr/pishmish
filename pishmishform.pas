@@ -86,10 +86,12 @@ type
     FDownY: Integer;
     FEditMenu: TPopupMenu;
     FCopyItem: TMenuItem;
+    FCopyLinkItem: TMenuItem;
     FOpenLinkItem: TMenuItem;
     FRightLink: string;               // link under the right-clicked position
     procedure EditMenuPopup(Sender: TObject);
     procedure EditMenuCopyClick(Sender: TObject);
+    procedure CopyLinkClick(Sender: TObject);
     procedure OpenLinkInNewWindowClick(Sender: TObject);
     procedure OpenInNewWindow(const AURL: string);
     function CertSubject(const AFileName: string): string;
@@ -269,6 +271,11 @@ begin
   Itm.OnClick := OpenLinkInNewWindowClick;
   FEditMenu.Items.Add(Itm);
   FOpenLinkItem := Itm;
+  Itm := TMenuItem.Create(Self);
+  Itm.Caption := 'Copy &link';
+  Itm.OnClick := CopyLinkClick;
+  FEditMenu.Items.Add(Itm);
+  FCopyLinkItem := Itm;
   FEditMenu.Items.Add(TMenuItem.Create(Self));
   Itm := TMenuItem.Create(Self);
   Itm.Caption := '&Copy';
@@ -761,6 +768,15 @@ begin
     end;
 
     R := FGemini.Request(U);
+    // gemini has no way to tell that a path is a directory, the server cannot
+    // send an index file on request like http does, so when a path ends with a
+    // slash and the capsule has nothing there, the convention is index.gmi
+    if (U[Length(U)] = '/') and
+       (R.Status in [IdGemini.gsTempFailure, IdGemini.gsPermFailure, IdGemini.gsUnknown]) then
+    begin
+      R.Free;
+      R := FGemini.Request(U + 'index.gmi');
+    end;
     try
       if (R.Status = IdGemini.gsInput) or (R.Status = IdGemini.gsSensitiveInput) then
       begin
@@ -930,6 +946,15 @@ begin
   end;
 end;
 
+procedure TMainForm.CopyLinkClick(Sender: TObject);
+begin
+  if FRightLink = '' then Exit;
+  try
+    Clipboard.AsText := FRightLink;
+  except
+  end;
+end;
+
 procedure TMainForm.EditMenuCopyClick(Sender: TObject);
 begin
   if GmiView.SelAvail then
@@ -945,6 +970,7 @@ procedure TMainForm.EditMenuPopup(Sender: TObject);
 begin
   FCopyItem.Enabled := GmiView.SelAvail;
   FOpenLinkItem.Enabled := FRightLink <> '';
+  FCopyLinkItem.Enabled := FRightLink <> '';
 end;
 
 procedure TMainForm.GmiMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
