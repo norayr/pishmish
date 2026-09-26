@@ -1033,14 +1033,13 @@ begin
   if (Line >= 0) and (Line < Length(FDocLinks)) and (FDocLinks[Line] <> '') then
   begin
     GmiView.Cursor := crHandPoint;
-    if (Line <> FLinkLine) and (FDocLinks[Line] <> kNewIdentityCmd) and (FPageStatus <> '') then
+    if (Line <> FLinkLine) and (FDocLinks[Line] <> kNewIdentityCmd) then
       StatusBar.SimpleText := '→ ' + FDocLinks[Line];
   end
   else
   begin
     GmiView.Cursor := crDefault;
-    if FPageStatus <> '' then
-      StatusBar.SimpleText := FPageStatus;
+    StatusBar.SimpleText := FPageStatus;
   end;
   if Line <> FLinkLine then
   begin
@@ -1052,8 +1051,7 @@ end;
 procedure TMainForm.GmiMouseLeave(Sender: TObject);
 begin
   GmiView.Cursor := crDefault;
-  if FPageStatus <> '' then
-    StatusBar.SimpleText := FPageStatus;
+  StatusBar.SimpleText := FPageStatus;
   if FLinkLine >= 0 then
   begin
     FLinkLine := -1;
