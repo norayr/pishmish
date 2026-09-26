@@ -40,11 +40,11 @@
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="pishmish_unit.pas"/>
+        <Filename Value="pishmishform.pas"/>
         <IsPartOfProject Value="True"/>
         <ComponentName Value="MainForm"/>
         <ResourceBaseClass Value="Form"/>
-        <UnitName Value="pishmish_unit"/>
+        <UnitName Value="pishmishform"/>
       </Unit>
       <Unit>
         <Filename Value="../../laz/components-4.2/Indy/Lib/indylaz.lpk"/>

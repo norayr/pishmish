@@ -5,7 +5,7 @@ program pishmish;
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
   Interfaces, Forms, SynEdit,
-  pishmish_unit;
+  pishmishform;
 
 {$R *.res}
 
