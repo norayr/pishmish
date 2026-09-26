@@ -90,8 +90,6 @@ type
     FRightLink: string;               // link under the right-clicked position
     procedure EditMenuPopup(Sender: TObject);
     procedure EditMenuCopyClick(Sender: TObject);
-    procedure EditMenuCutClick(Sender: TObject);
-    procedure EditMenuPasteClick(Sender: TObject);
     procedure OpenLinkInNewWindowClick(Sender: TObject);
     procedure OpenInNewWindow(const AURL: string);
     function CertSubject(const AFileName: string): string;
@@ -272,18 +270,10 @@ begin
   FOpenLinkItem := Itm;
   FEditMenu.Items.Add(TMenuItem.Create(Self));
   Itm := TMenuItem.Create(Self);
-  Itm.Caption := 'Cu&t';
-  Itm.OnClick := EditMenuCutClick;
-  FEditMenu.Items.Add(Itm);
-  Itm := TMenuItem.Create(Self);
   Itm.Caption := '&Copy';
   Itm.OnClick := EditMenuCopyClick;
   FEditMenu.Items.Add(Itm);
   FCopyItem := Itm;
-  Itm := TMenuItem.Create(Self);
-  Itm.Caption := 'Paste';
-  Itm.OnClick := EditMenuPasteClick;
-  FEditMenu.Items.Add(Itm);
   FEditMenu.OnPopup := EditMenuPopup;
   GmiView.PopupMenu := FEditMenu;
   // Ctrl + mouse wheel zooms the text (same as heliko)
@@ -310,19 +300,6 @@ begin
   begin
     Key := 0;
     OpenInNewWindow('');
-    Exit;
-  end;
-  if (ssCtrl in Shift) and (Key = VK_X) then
-  begin
-    if GmiView.SelAvail then
-    begin
-      try
-        Clipboard.AsText := GmiView.SelText;
-        GmiView.SelText := '';
-      except
-      end;
-      Key := 0;
-    end;
     Exit;
   end;
   if (ssCtrl in Shift) and (Key = VK_C) then
@@ -948,23 +925,6 @@ begin
     except
     end;
   end;
-end;
-
-procedure TMainForm.EditMenuCutClick(Sender: TObject);
-begin
-  if GmiView.SelAvail then
-  begin
-    try
-      Clipboard.AsText := GmiView.SelText;
-      GmiView.SelText := '';
-    except
-    end;
-  end;
-end;
-
-procedure TMainForm.EditMenuPasteClick(Sender: TObject);
-begin
-  GmiView.PasteFromClipboard;
 end;
 
 procedure TMainForm.EditMenuPopup(Sender: TObject);
