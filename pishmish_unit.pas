@@ -230,16 +230,29 @@ end;
 procedure TMainForm.FormCreate(Sender: TObject);
 var
   Itm: TMenuItem;
+  I: Integer;
+  IdentArg: string;
 begin
-  // 'pishmish <url>' opens that page, used by 'open link in new window'
-  if (ParamCount > 0) and (ParamStr(1) <> '') and (ParamStr(1)[1] <> '-') then
-    UrlEdit.Text := ParamStr(1);
+  // 'pishmish <url> --ident=<n>' opens that page with that identity, used by
+  // 'open link in new window'. '--ident' alone opens the default page.
+  IdentArg := '';
+  for I := 1 to ParamCount do
+    if Copy(ParamStr(I), 1, 8) = '--ident=' then
+      IdentArg := Copy(ParamStr(I), 9, MaxInt)
+    else if (ParamStr(I) <> '') and (ParamStr(I)[1] <> '-') then
+      UrlEdit.Text := ParamStr(I);
   FGemini := TIdGemini.Create(Self);
   FGemtextHL := TGemtextHighlighter.Create(Self);
   KeyPreview := True;
   OnKeyDown := FormKeyDown;
   LoadIdents;
-  IdentityBox.ItemIndex := 0;
+  if IdentArg <> '' then
+  begin
+    SelectIdentity(StrToIntDef(IdentArg, 0));
+    IdentityBox.OnChange := IdentityBoxChange;
+  end
+  else
+    IdentityBox.ItemIndex := 0;
   FLinkLine := -1;
   FPageStatus := '';
   FHistoryPos := -1;
@@ -253,6 +266,12 @@ begin
   GmiView.OnMouseDown := GmiMouseDown;
   FEditMenu := TPopupMenu.Create(Self);
   Itm := TMenuItem.Create(Self);
+  Itm.Caption := 'Open &link in new window';
+  Itm.OnClick := OpenLinkInNewWindowClick;
+  FEditMenu.Items.Add(Itm);
+  FOpenLinkItem := Itm;
+  FEditMenu.Items.Add(TMenuItem.Create(Self));
+  Itm := TMenuItem.Create(Self);
   Itm.Caption := 'Cu&t';
   Itm.OnClick := EditMenuCutClick;
   FEditMenu.Items.Add(Itm);
@@ -265,15 +284,6 @@ begin
   Itm.Caption := 'Paste';
   Itm.OnClick := EditMenuPasteClick;
   FEditMenu.Items.Add(Itm);
-  Itm := TMenuItem.Create(Self);
-  Itm.Caption := 'Select &All';
-  FEditMenu.Items.Add(Itm);
-  FEditMenu.Items.Add(TMenuItem.Create(Self));
-  Itm := TMenuItem.Create(Self);
-  Itm.Caption := 'Open &link in new window';
-  Itm.OnClick := OpenLinkInNewWindowClick;
-  FEditMenu.Items.Add(Itm);
-  FOpenLinkItem := Itm;
   FEditMenu.OnPopup := EditMenuPopup;
   GmiView.PopupMenu := FEditMenu;
   // Ctrl + mouse wheel zooms the text (same as heliko)
@@ -1061,6 +1071,7 @@ procedure TMainForm.OpenInNewWindow(const AURL: string);
 var
   Proc: TProcess;
   Exe: string;
+  Ident: Integer;
 begin
   if Copy(AURL, 1, 7) = 'http://' then
   begin
@@ -1071,12 +1082,15 @@ begin
   Exe := ParamStr(0);
   if not FileExists(Exe) then
     Exe := Application.ExeName;
+  Ident := IdentityBox.ItemIndex;
   // a second process, so the new window has its own history
   Proc := TProcess.Create(nil);
   try
     Proc.Executable := Exe;
     if AURL <> '' then
       Proc.Parameters.Add(AURL);
+    if Ident > 0 then
+      Proc.Parameters.Add('--ident=' + IntToStr(Ident));
     Proc.Options := [poNoConsole, poDetached];
     Proc.Execute;
   finally
@@ -1098,6 +1112,19 @@ var
   Created: Boolean;
   NewKey: string;
 begin
+  // middle click and ctrl+click open a link in a new window, firefox style
+  if (Button = mbMiddle) or ((Button = mbLeft) and (ssCtrl in Shift)) then
+  begin
+    Pt := GmiView.PixelsToRowColumn(Point(X, Y));
+    Line := Pt.Y - 1;
+    if (Line >= 0) and (Line < Length(FDocLinks)) and
+       (FDocLinks[Line] <> '') and (FDocLinks[Line] <> kNewIdentityCmd) then
+    begin
+      OpenInNewWindow(FDocLinks[Line]);
+      Exit;
+    end;
+    Exit;
+  end;
   if Button <> mbLeft then Exit;
   // a drag is a text selection for copying; only a plain click opens a link
   if (Abs(X - FDownX) + Abs(Y - FDownY) > 5) or GmiView.SelAvail then Exit;
