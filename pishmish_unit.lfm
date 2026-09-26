@@ -39,7 +39,6 @@ object MainForm: TMainForm
       Height = 30
       Top = 5
       Width = 430
-      Text = 'gemini://bbs.geminispace.org/'
       OnKeyPress = UrlEditKeyPress
     end
     object GoBtn: TButton
