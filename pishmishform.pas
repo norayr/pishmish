@@ -100,6 +100,7 @@ type
     function ResolveLink(const ARelative: string): string;
     procedure Fetch(const AURL: string; APush: Boolean = True);
     function NormalizeURL(const AURL: string): string;
+    function BaseOf(const AURL: string): string;
     procedure Render(const ABody: string);
     procedure AddCreateIdentityHint;
     procedure GmiMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
@@ -746,11 +747,29 @@ begin
   Result := S;
 end;
 
+// scheme and host of an url
+function TMainForm.BaseOf(const AURL: string): string;
+var
+  P, Q: Integer;
+begin
+  Result := '';
+  P := Pos('://', AURL);
+  if P = 0 then Exit;
+  Q := P + 3;
+  while (Q <= Length(AURL)) and (AURL[Q] <> '/') and (AURL[Q] <> '?') do
+    Inc(Q);
+  Result := Copy(AURL, 1, Q - 1);
+end;
+
 procedure TMainForm.Fetch(const AURL: string; APush: Boolean = True);
 var
   R: TGeminiResponse;
   Input: string;
-  U: string;
+  U: string;      // the url the user asked for, it stays in the address bar
+  RU: string;     // the url we are really requesting
+  M: string;      // a url the capsule named
+  P: Integer;
+  Tries: Integer;
 begin
   U := NormalizeURL(AURL);
   if U = '' then Exit;
@@ -767,15 +786,46 @@ begin
       FGemini.SSLIOHandler.SSLOptions.KeyFile := '';
     end;
 
-    R := FGemini.Request(U);
-    // gemini has no way to tell that a path is a directory, the server cannot
-    // send an index file on request like http does, so when a path ends with a
-    // slash and the capsule has nothing there, the convention is index.gmi
-    if (U[Length(U)] = '/') and
-       (R.Status in [IdGemini.gsTempFailure, IdGemini.gsPermFailure, IdGemini.gsUnknown]) then
+    RU := U;
+    Tries := 0;
+    while Tries < 10 do
     begin
-      R.Free;
-      R := FGemini.Request(U + 'index.gmi');
+      R := FGemini.Request(RU);
+      Inc(Tries);
+      // a redirect carries the new url in the meta, and the page is really there
+      if (R.Status in [IdGemini.gsRedirectTemporary, IdGemini.gsRedirectPermanent]) and
+         (Trim(R.Meta) <> '') then
+      begin
+        M := Trim(R.Meta);
+        if Pos('://', M) = 0 then
+        begin
+          // a relative url is resolved against the one we came from
+          if M[1] = '/' then
+            M := BaseOf(RU) + M
+          else
+          begin
+            P := LastDelimiter('/', RU);
+            if P > 0 then
+              M := Copy(RU, 1, P) + M;
+          end;
+        end;
+        RU := NormalizeURL(M);
+        U := RU;
+        R.Free;
+        Continue;
+      end;
+      // gemini has no way to tell that a path is a directory, the server cannot
+      // send an index file on request like http does, so when a path ends with a
+      // slash and the capsule has nothing there, the convention is index.gmi
+      if (RU[Length(RU)] = '/') and
+         (R.Status in [IdGemini.gsTempFailure, IdGemini.gsPermFailure, IdGemini.gsUnknown]) then
+      begin
+        RU := RU + 'index.gmi';
+        R.Free;
+        R := FGemini.Request(RU);
+        Inc(Tries);
+      end;
+      Break;
     end;
     try
       if (R.Status = IdGemini.gsInput) or (R.Status = IdGemini.gsSensitiveInput) then
@@ -784,7 +834,7 @@ begin
         if InputQuery('Input required', R.Meta, Input) then
         begin
           R.Free;
-          R := FGemini.Request(U, Input);
+          R := FGemini.Request(RU, Input);
         end;
       end;
 
